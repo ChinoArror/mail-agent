@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+workers_mail_app_package/node_modules/
+
+# Cloudflare / Wrangler local state
+.wrangler/
+workers_mail_app_package/.wrangler/
+
+# Build outputs
+dist/
+workers_mail_app_package/dist/
+build/
+out/
+.vite/
+
+# Test outputs and screenshots
+coverage/
+test-results/
+playwright-report/
+output/
+workers_mail_app_package/output/
+*.snap
+*.trace
+
+# Secrets
+secret.txt
+**/secret.txt
+.env
+.env.*
+
+# User-provided prompts, guidance, and checklists
+AGENT_PROMPT.md
+UPDATED_AGENT_PROMPT.md
+UI_CHECKLIST.md
+ui_update_guidance.md
+page_description.md
+workers_mail_app_package/AGENT_PROMPT.md
+workers_mail_app_package/checklists/
+
+# User-provided images and generated image artifacts
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.avif
+*.bmp
+*.tiff
+*.svg

@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mail-agent",
+  "compatibility_date": "2026-05-12",
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "workers_mail_app_package"
+  },
+  "compatibility_flags": [
+    "nodejs_compat"
+  ]
+}

@@ -1,0 +1,64 @@
+name = "mail-agent"
+main = "src/server/worker.ts"
+compatibility_date = "2026-05-12"
+compatibility_flags = ["nodejs_compat"]
+routes = [
+  { pattern = "mail.112327.xyz", custom_domain = true }
+]
+
+[assets]
+directory = "dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[vars]
+APP_ID = "mail-agent"
+APP_UUID = "357a4032-ce5b-49bd-8ab4-24b06d5a7e5b"
+AUTH_CENTER_URL = "https://accounts.aryuki.com"
+CALLBACK_URL = "https://mail.112327.xyz/sso-callback"
+MAIL_DOMAIN = "112327.xyz"
+DEFAULT_MAX_MAILBOXES = "5"
+DEFAULT_MAX_SEND_PER_DAY = "50"
+DEFAULT_MAX_RECEIVE_PER_DAY = "200"
+DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES = "104857600"
+GEMINI_MODEL = "gemini-3-flash-preview"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mail-agent-db"
+database_id = "730603a4-3b9f-45b9-bc03-311d116f3c49"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "MAIL_BUCKET"
+bucket_name = "mail-agent-save"
+
+[[queues.producers]]
+binding = "MAIL_PARSE_QUEUE"
+queue = "mail-parse-queue"
+
+[[queues.producers]]
+binding = "MAIL_SEND_QUEUE"
+queue = "mail-send-queue"
+
+[[queues.producers]]
+binding = "AGENT_GENERATE_QUEUE"
+queue = "agent-generate-queue"
+
+[[queues.consumers]]
+queue = "mail-parse-queue"
+max_batch_size = 5
+max_batch_timeout = 30
+max_retries = 3
+
+[[queues.consumers]]
+queue = "mail-send-queue"
+max_batch_size = 5
+max_batch_timeout = 30
+max_retries = 3
+
+[[queues.consumers]]
+queue = "agent-generate-queue"
+max_batch_size = 3
+max_batch_timeout = 30
+max_retries = 2
