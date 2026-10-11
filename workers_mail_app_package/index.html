@@ -2,11 +2,52 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Mail Agent</title>
+    <meta name="description" content="Temporary mail with real delivery, drafts and AI assist." />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#fbfdff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f1520" media="(prefers-color-scheme: dark)" />
+    <script>
+      // Apply the theme before first paint so there is no light→dark flash.
+      (function () {
+        try {
+          var t = localStorage.getItem("theme");
+          var dark = t === "dark" || ((!t || t === "system") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+          // Appearance preferences (mirrors applyPrefs in src/client/lib.ts).
+          var p = JSON.parse(localStorage.getItem("mail_agent_prefs") || "{}");
+          var A = { sky: [230, 68.5, 0.155, 75, 0.14], blue: [262, 58, 0.19, 70, 0.15], violet: [292, 58, 0.2, 72, 0.16], rose: [12, 62, 0.2, 72, 0.16], emerald: [160, 62, 0.15, 74, 0.14], amber: [72, 72, 0.16, 80, 0.15], orange: [45, 66, 0.18, 75, 0.16] };
+          var a = A[p.accent || "sky"] || [p.hue || 230, 64, 0.17, 74, 0.15];
+          var r = document.documentElement, st = r.style;
+          st.setProperty("--accent-h", a[0]); st.setProperty("--accent-l", a[1] + "%"); st.setProperty("--accent-c", a[2]);
+          st.setProperty("--accent-dl", a[3] + "%"); st.setProperty("--accent-dc", a[4]);
+          r.dataset.darkIntensity = p.darkStyle || "night";
+          r.dataset.density = p.density || "comfortable";
+          r.dataset.contrast = p.contrast || "normal";
+          var m = p.motion || "system";
+          r.dataset.motion = m === "system" ? (window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "reduced" : "full") : m;
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      /* Pre-JS boot splash — replaced by React on first render. */
+      html { background: oklch(99% 0.004 240); }
+      html.dark { background: oklch(16% 0.02 250); }
+      html.dark[data-dark-intensity="black"] { background: #000; }
+      .boot-splash { position: fixed; inset: 0; display: grid; place-items: center; }
+      .boot-splash div { position: relative; width: 56px; height: 56px; display: grid; place-items: center; border-radius: 17px; background: oklch(68.5% 0.155 230 / 0.1); }
+      .boot-splash div::after { content: ""; position: absolute; inset: -4px; border-radius: 21px; border: 2px solid transparent; border-top-color: oklch(var(--accent-l, 68.5%) var(--accent-c, 0.155) var(--accent-h, 230)); animation: boot-spin 0.85s linear infinite; }
+      .boot-splash img { width: 36px; height: 36px; }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="boot-splash" aria-label="Loading Mail Agent"><div><img src="/logo.svg" alt="" /></div></div></div>
     <script type="module" src="/src/client/main.tsx"></script>
   </body>
 </html>

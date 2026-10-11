@@ -469,6 +469,179 @@ async function ensureDefaultSettings(env: Env) {
   ));
 }
 
+// ---------------------------------------------------------------------------
+// Landing background — Auth Center crop model (original + cropped, 30-min restore)
+// ---------------------------------------------------------------------------
+const BG_RESTORE_WINDOW_MS = 30 * 60 * 1000;
+const BG_MAX_BYTES = 8 * 1024 * 1024;
+const BG_KEYS = ["landing_background", "landing_background_original", "landing_background_crop", "landing_background_pending"] as const;
+
+interface BackgroundCrop {
+  scale: number;
+  x: number;
+  y: number;
+  aspect: number;
+}
+
+interface BackgroundPending {
+  token: string;
+  deadline: string;
+  cropped_key: string | null;
+  cropped_type: string | null;
+  original_key: string | null;
+  original_type: string | null;
+  crop: BackgroundCrop | null;
+}
+
+interface BackgroundState {
+  cropped_key: string | null;
+  cropped_type: string | null;
+  original_key: string | null;
+  original_type: string | null;
+  crop: BackgroundCrop | null;
+  pending: BackgroundPending | null;
+  version: string;
+}
+
+function imageExt(contentType: string) {
+  const map: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif" };
+  return map[contentType] || "img";
+}
+
+function normalizeCrop(raw: unknown): BackgroundCrop | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown, min: number, max: number, fallback: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+  };
+  return { scale: num(r.scale, 1, 3, 1), x: num(r.x, -1, 1, 0), y: num(r.y, -1, 1, 0), aspect: num(r.aspect, 0.2, 5, 16 / 9) };
+}
+
+async function readBackgroundState(env: Env): Promise<BackgroundState> {
+  const placeholders = BG_KEYS.map(() => "?").join(",");
+  const rows = await all<{ key: string; value: string | null; r2_key: string | null; updated_at: string }>(
+    env.DB.prepare(`SELECT key, value, r2_key, updated_at FROM app_settings WHERE key IN (${placeholders})`).bind(...BG_KEYS)
+  );
+  const row = (key: string) => rows.find((r) => r.key === key);
+  const cropped = row("landing_background");
+  const original = row("landing_background_original");
+  return {
+    cropped_key: cropped?.r2_key || null,
+    cropped_type: cropped?.value || null,
+    original_key: original?.r2_key || null,
+    original_type: original?.value || null,
+    crop: normalizeCrop(safeJson<unknown>(row("landing_background_crop")?.value, null)),
+    pending: safeJson<BackgroundPending | null>(row("landing_background_pending")?.value, null),
+    version: (cropped?.updated_at || "").replace(/[^0-9]/g, "")
+  };
+}
+
+async function writeBackgroundState(env: Env, next: Omit<BackgroundState, "version">) {
+  const ts = now();
+  const upsert = "INSERT INTO app_settings (key, value, type, r2_key, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, type = excluded.type, r2_key = excluded.r2_key, updated_at = excluded.updated_at";
+  await env.DB.batch([
+    env.DB.prepare(upsert).bind("landing_background", next.cropped_type || "", "image", next.cropped_key, ts),
+    env.DB.prepare(upsert).bind("landing_background_original", next.original_type || "", "image", next.original_key, ts),
+    env.DB.prepare(upsert).bind("landing_background_crop", next.crop ? JSON.stringify(next.crop) : "", "json", null, ts),
+    env.DB.prepare(upsert).bind("landing_background_pending", next.pending ? JSON.stringify(next.pending) : "", "json", null, ts)
+  ]);
+}
+
+async function deleteObjects(env: Env, keys: Array<string | null | undefined>) {
+  const unique = Array.from(new Set(keys.filter((k): k is string => !!k)));
+  await Promise.all(unique.map((key) => env.MAIL_BUCKET.delete(key).catch(() => undefined)));
+}
+
+/** Permanently removes a soft-deleted background once its restore window has passed. */
+async function purgeExpiredBackground(env: Env) {
+  const state = await readBackgroundState(env);
+  if (!state.pending || new Date(state.pending.deadline).getTime() > Date.now()) return;
+  const { pending, version: _version, ...rest } = state;
+  await writeBackgroundState(env, { ...rest, pending: null });
+  await deleteObjects(env, [pending.cropped_key, pending.original_key].filter((k) => k !== state.cropped_key && k !== state.original_key));
+}
+
+function backgroundPublicUrl(state: BackgroundState) {
+  return state.cropped_key ? `/api/landing-background?v=${state.version}` : "";
+}
+
+function backgroundAdminView(state: BackgroundState) {
+  const pendingActive = state.pending && new Date(state.pending.deadline).getTime() > Date.now() ? state.pending : null;
+  return {
+    landing_background_url: backgroundPublicUrl(state),
+    landing_background_original_url: state.original_key ? `/api/admin/system-settings/background/original?v=${state.version}` : "",
+    landing_background_crop: state.crop,
+    landing_background_restore: pendingActive ? { token: pendingActive.token, deadline: pendingActive.deadline } : null
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Landing page + sign-in loading page appearance (admin → System settings)
+// ---------------------------------------------------------------------------
+type UiSettingSpec = { type: "string" | "boolean" | "number"; enum?: string[]; max?: number; fallback: string };
+const UI_SETTINGS: Record<string, UiSettingSpec> = {
+  landing_mode: { type: "string", enum: ["wave", "image"], fallback: "" },
+  landing_title: { type: "string", max: 60, fallback: "Mail Agent" },
+  landing_tagline: { type: "string", max: 160, fallback: "Temporary mail with real delivery, drafts and AI assist." },
+  landing_show_features: { type: "boolean", fallback: "true" },
+  landing_waves_over_image: { type: "boolean", fallback: "true" },
+  landing_wave_opacity: { type: "number", fallback: "1" },
+  loading_style: { type: "string", enum: ["steps", "minimal"], fallback: "steps" },
+  loading_title: { type: "string", max: 60, fallback: "Signing you in" },
+  loading_subtitle: { type: "string", max: 160, fallback: "This usually takes a second." },
+  loading_show_progress: { type: "boolean", fallback: "true" },
+  loading_show_waves: { type: "boolean", fallback: "true" }
+};
+
+/** Validates one UI setting; returns the stored string or null when the value is not acceptable. */
+function normalizeUiSetting(key: string, raw: unknown): string | null {
+  const spec = UI_SETTINGS[key];
+  if (!spec) return null;
+  if (spec.type === "boolean") return raw === true || raw === "true" || raw === 1 ? "true" : "false";
+  if (spec.type === "number") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? String(Math.max(0, Math.min(1, n))) : null;
+  }
+  const text = String(raw ?? "").replace(/[\r\n]+/g, " ").trim().slice(0, spec.max ?? 200);
+  if (spec.enum) return spec.enum.includes(text) ? text : null;
+  return text || spec.fallback;
+}
+
+async function readUiSettings(env: Env, hasBackground: boolean) {
+  const keys = Object.keys(UI_SETTINGS);
+  const rows = await all<{ key: string; value: string | null }>(env.DB.prepare(`SELECT key, value FROM app_settings WHERE key IN (${keys.map(() => "?").join(",")})`).bind(...keys));
+  const get = (key: string) => {
+    const v = rows.find((r) => r.key === key)?.value;
+    return v === null || v === undefined || v === "" ? UI_SETTINGS[key].fallback : v;
+  };
+  // Before this setting existed, an uploaded background was always shown.
+  const mode = get("landing_mode") || (hasBackground ? "image" : "wave");
+  return {
+    landing: {
+      mode: mode === "image" ? "image" : "wave",
+      title: get("landing_title"),
+      tagline: get("landing_tagline"),
+      show_features: get("landing_show_features") === "true",
+      waves_over_image: get("landing_waves_over_image") === "true",
+      wave_opacity: Math.max(0, Math.min(1, Number(get("landing_wave_opacity")) || 0))
+    },
+    loading: {
+      style: get("loading_style") === "minimal" ? "minimal" : "steps",
+      title: get("loading_title"),
+      subtitle: get("loading_subtitle"),
+      show_progress: get("loading_show_progress") === "true",
+      show_waves: get("loading_show_waves") === "true"
+    }
+  };
+}
+
+async function setLandingMode(env: Env, mode: "wave" | "image") {
+  await env.DB.prepare("INSERT INTO app_settings (key, value, type, updated_at) VALUES ('landing_mode', ?, 'string', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, type = excluded.type, updated_at = excluded.updated_at")
+    .bind(mode, now())
+    .run();
+}
+
 function parseDateParam(value: string | null) {
   if (!value) return null;
   const d = new Date(value);
@@ -670,25 +843,39 @@ app.post("/api/sso-callback", async (c) => {
 
 app.get("/api/public-config", async (c) => {
   await ensureDefaultSettings(c.env);
-  const opacity = await first<{ value: string | null }>(c.env.DB.prepare("SELECT value FROM app_settings WHERE key = 'landing_background_opacity'"));
-  const bg = await first<{ r2_key: string | null }>(c.env.DB.prepare("SELECT r2_key FROM app_settings WHERE key = 'landing_background'"));
+  const [opacity, state] = await Promise.all([
+    first<{ value: string | null }>(c.env.DB.prepare("SELECT value FROM app_settings WHERE key = 'landing_background_opacity'")),
+    readBackgroundState(c.env)
+  ]);
+  if (state.pending) c.executionCtx.waitUntil(purgeExpiredBackground(c.env).catch(() => undefined));
+  const ui = await readUiSettings(c.env, !!state.cropped_key);
   return ok({
     app_id: c.env.APP_ID,
     app_uuid: c.env.APP_UUID,
     auth_center_url: c.env.AUTH_CENTER_URL,
     callback_url: c.env.CALLBACK_URL,
-    landing_background_url: bg?.r2_key ? "/api/landing-background" : "",
-    landing_background_opacity: Math.max(0, Math.min(Number(opacity?.value || 0.18), 1))
+    // The image stays stored while the Wave page is active, but it is only served to the sign-in page in image mode.
+    landing_background_url: ui.landing.mode === "image" ? backgroundPublicUrl(state) : "",
+    landing_background_opacity: Math.max(0, Math.min(Number(opacity?.value || 0.18), 1)),
+    landing: ui.landing,
+    loading: ui.loading
   });
 });
 
 app.get("/api/landing-background", async (c) => {
   await ensureDefaultSettings(c.env);
-  const row = await first<{ value: string | null; r2_key: string | null }>(c.env.DB.prepare("SELECT value, r2_key FROM app_settings WHERE key = 'landing_background'"));
-  if (!row?.r2_key) return fail("BACKGROUND_NOT_FOUND", "No custom landing background", 404);
-  const object = await c.env.MAIL_BUCKET.get(row.r2_key);
+  const state = await readBackgroundState(c.env);
+  if (!state.cropped_key) return fail("BACKGROUND_NOT_FOUND", "No custom landing background", 404);
+  const object = await c.env.MAIL_BUCKET.get(state.cropped_key);
   if (!object) return fail("BACKGROUND_NOT_FOUND", "Background object missing", 404);
-  return new Response(object.body, { headers: { "Content-Type": row.value || object.httpMetadata?.contentType || "image/jpeg", "Cache-Control": "public, max-age=300" } });
+  // Versioned URLs change whenever the crop changes, so they can be cached aggressively.
+  const versioned = c.req.query("v") === state.version;
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": state.cropped_type || object.httpMetadata?.contentType || "image/jpeg",
+      "Cache-Control": versioned ? "public, max-age=31536000, immutable" : "public, max-age=300"
+    }
+  });
 });
 
 app.use("/api/*", requireAuth);
@@ -1254,6 +1441,62 @@ app.patch("/api/me/settings", async (c) => {
   return ok({ id: user.id, display_name: body.display_name, avatar_url: body.avatar_url, language, theme, draft_retention_days: retention });
 });
 
+// ---------------------------------------------------------------------------
+// Per-account interface preferences (Personal settings → appearance)
+// ---------------------------------------------------------------------------
+let preferencesTableReady = false;
+
+/** Migration 0005 creates the table; this guard keeps older databases working until it is applied. */
+async function ensurePreferencesTable(env: Env) {
+  if (preferencesTableReady) return;
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS user_preferences (user_id TEXT PRIMARY KEY, prefs TEXT NOT NULL, updated_at TEXT NOT NULL)").run();
+  preferencesTableReady = true;
+}
+
+const PREF_ENUMS: Record<string, string[]> = {
+  theme: ["system", "light", "dark"],
+  accent: ["sky", "blue", "violet", "rose", "emerald", "amber", "orange", "custom"],
+  darkStyle: ["night", "black"],
+  density: ["comfortable", "compact"],
+  contrast: ["normal", "high"],
+  motion: ["system", "full", "reduced", "off"]
+};
+
+/** Whitelists known keys so arbitrary client JSON is never stored. */
+function sanitizePrefs(raw: unknown) {
+  const input = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const out: Record<string, unknown> = {};
+  for (const [key, values] of Object.entries(PREF_ENUMS)) {
+    if (typeof input[key] === "string" && values.includes(input[key] as string)) out[key] = input[key];
+  }
+  const hue = Number(input.hue);
+  if (Number.isFinite(hue)) out.hue = Math.round(Math.max(0, Math.min(360, hue)));
+  for (const key of ["loginWaves", "themeReveal"]) if (typeof input[key] === "boolean") out[key] = input[key];
+  return out;
+}
+
+app.get("/api/me/preferences", async (c) => {
+  const user = c.get("user");
+  await ensurePreferencesTable(c.env);
+  const row = await first<{ prefs: string; updated_at: string }>(c.env.DB.prepare("SELECT prefs, updated_at FROM user_preferences WHERE user_id = ?").bind(user.id));
+  return ok({ prefs: row ? sanitizePrefs(safeJson<unknown>(row.prefs, {})) : null, updated_at: row?.updated_at || null });
+});
+
+app.put("/api/me/preferences", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json<{ prefs?: unknown }>().catch(() => ({} as { prefs?: unknown }));
+  const prefs = sanitizePrefs(body.prefs);
+  if (!Object.keys(prefs).length) return fail("INVALID_PREFERENCES", "No valid preferences provided", 400);
+  await ensurePreferencesTable(c.env);
+  const ts = now();
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO user_preferences (user_id, prefs, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET prefs = excluded.prefs, updated_at = excluded.updated_at").bind(user.id, JSON.stringify(prefs), ts),
+    // Keep the legacy users.theme column in step for older clients.
+    ...(prefs.theme ? [c.env.DB.prepare("UPDATE users SET theme = ?, updated_at = ? WHERE id = ?").bind(prefs.theme as string, ts, user.id)] : [])
+  ]);
+  return ok({ prefs, updated_at: ts });
+});
+
 app.get("/api/usage/trends", async (c) => {
   const user = c.get("user");
   const days = Math.max(1, Math.min(Number(c.req.query("days") || 7), 90));
@@ -1419,10 +1662,14 @@ app.delete("/api/admin/roles/:id", async (c) => {
 
 app.get("/api/admin/system-settings", async (c) => {
   await ensureDefaultSettings(c.env);
-  const rows = await all<{ key: string; value: string | null; type: string; r2_key: string | null }>(c.env.DB.prepare("SELECT key, value, type, r2_key FROM app_settings WHERE key IN ('landing_background_opacity','landing_background') ORDER BY key ASC"));
+  await purgeExpiredBackground(c.env);
+  const [rows, state] = await Promise.all([
+    all<{ key: string; value: string | null; type: string }>(c.env.DB.prepare("SELECT key, value, type FROM app_settings WHERE key IN ('landing_background_opacity') ORDER BY key ASC")),
+    readBackgroundState(c.env)
+  ]);
   const settings = Object.fromEntries(rows.map((row) => [row.key, coerceSettingValue(row.value, row.type)]));
-  const background = rows.find((row) => row.key === "landing_background");
-  return ok({ settings: { ...settings, landing_background_url: background?.r2_key ? "/api/landing-background" : "" } });
+  const ui = await readUiSettings(c.env, !!state.cropped_key);
+  return ok({ settings: { ...settings, ...backgroundAdminView(state), landing: ui.landing, loading: ui.loading } });
 });
 
 app.patch("/api/admin/system-settings", async (c) => {
@@ -1441,37 +1688,139 @@ app.patch("/api/admin/system-settings", async (c) => {
       .run();
     saved[key] = coerceSettingValue(value, type);
   }
+  // Landing page + loading page appearance: { landing: {...}, loading: {...} } or flat landing_* / loading_* keys.
+  const flat: Record<string, unknown> = { ...body };
+  for (const group of ["landing", "loading"] as const) {
+    const nested = body[group];
+    if (nested && typeof nested === "object") for (const [k, v] of Object.entries(nested as Record<string, unknown>)) flat[`${group}_${k}`] = v;
+  }
+  const invalid: string[] = [];
+  const uiStatements: D1PreparedStatement[] = [];
+  for (const key of Object.keys(UI_SETTINGS)) {
+    if (!(key in flat)) continue;
+    const value = normalizeUiSetting(key, flat[key]);
+    if (value === null) {
+      invalid.push(key);
+      continue;
+    }
+    uiStatements.push(
+      c.env.DB.prepare("INSERT INTO app_settings (key, value, type, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, type = excluded.type, updated_at = excluded.updated_at")
+        .bind(key, value, UI_SETTINGS[key].type, ts)
+    );
+    saved[key] = value;
+  }
+  if (invalid.length) return fail("INVALID_SETTING", `Invalid value for ${invalid.join(", ")}`, 400);
+  if (uiStatements.length) await c.env.DB.batch(uiStatements);
   await audit(c.env, actor, "admin.system_settings.update", "system", "app_settings", saved);
-  return ok({ settings: saved });
+  const state = await readBackgroundState(c.env);
+  const ui = await readUiSettings(c.env, !!state.cropped_key);
+  return ok({ settings: { ...saved, landing: ui.landing, loading: ui.loading } });
 });
 
+/**
+ * Save a landing background crop.
+ * multipart fields:
+ *   cropped  (required) — the rendered 16:9 image shown on the landing page
+ *   original (optional) — the full source image; omitted when only re-cropping the stored original
+ *   crop     (optional) — JSON {scale,x,y,aspect}, normalized so the editor can reopen at the same framing
+ * `file` is still accepted as a legacy alias of `cropped`.
+ */
 app.post("/api/admin/system-settings/background", async (c) => {
   const actor = c.get("user");
   const form = await c.req.formData();
-  const file = form.get("file");
-  if (!(file instanceof File)) return fail("FILE_REQUIRED", "Background image is required", 400);
-  if (!file.type.startsWith("image/")) return fail("INVALID_IMAGE", "Only images are allowed", 400);
-  if (file.size > 8 * 1024 * 1024) return fail("IMAGE_TOO_LARGE", "Image must be under 8MB", 413);
-  const key = `mail-sub/settings/landing-background/${id("bg")}-${sanitizeFilename(file.name || "background")}`;
-  await c.env.MAIL_BUCKET.put(key, file.stream(), { httpMetadata: { contentType: file.type } });
-  const previous = await first<{ r2_key: string | null }>(c.env.DB.prepare("SELECT r2_key FROM app_settings WHERE key = 'landing_background'"));
-  if (previous?.r2_key) await c.env.MAIL_BUCKET.delete(previous.r2_key);
-  await c.env.DB.prepare("INSERT INTO app_settings (key, value, type, r2_key, updated_at) VALUES ('landing_background', ?, 'image', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, type = excluded.type, r2_key = excluded.r2_key, updated_at = excluded.updated_at")
-    .bind(file.type, key, now())
-    .run();
-  await audit(c.env, actor, "admin.landing_background.upload", "system", "landing_background");
-  return ok({ url: "/api/landing-background" });
+  const cropped = form.get("cropped") ?? form.get("file");
+  const original = form.get("original");
+  if (!(cropped instanceof File)) return fail("FILE_REQUIRED", "Cropped background image is required", 400);
+  const files = [cropped, ...(original instanceof File ? [original] : [])];
+  for (const file of files) {
+    if (!file.type.startsWith("image/")) return fail("INVALID_IMAGE", "Only images are allowed", 400);
+    if (file.size > BG_MAX_BYTES) return fail("IMAGE_TOO_LARGE", "Image must be under 8MB", 413);
+  }
+  const crop = normalizeCrop(safeJson<unknown>(String(form.get("crop") || ""), null));
+  const state = await readBackgroundState(c.env);
+  const ts = Date.now();
+  const base = `mail-sub/Background/${c.env.APP_UUID || "landing"}`;
+  const croppedKey = `${base}/cropped/background-cropped-${ts}.${imageExt(cropped.type)}`;
+  const originalKey = original instanceof File ? `${base}/original/background-original-${ts}.${imageExt(original.type)}` : state.original_key;
+  if (!originalKey) return fail("ORIGINAL_REQUIRED", "Upload the source image together with the first crop", 400);
+
+  // Independent objects upload concurrently; old objects are removed only after the new ones are stored.
+  await Promise.all([
+    c.env.MAIL_BUCKET.put(croppedKey, cropped.stream(), { httpMetadata: { contentType: cropped.type } }),
+    original instanceof File ? c.env.MAIL_BUCKET.put(originalKey, original.stream(), { httpMetadata: { contentType: original.type } }) : Promise.resolve(null)
+  ]);
+  await writeBackgroundState(c.env, {
+    cropped_key: croppedKey,
+    cropped_type: cropped.type,
+    original_key: originalKey,
+    original_type: original instanceof File ? original.type : state.original_type,
+    crop,
+    pending: state.pending
+  });
+  const replaced = [state.cropped_key, original instanceof File ? state.original_key : null].filter((k) => k && k !== croppedKey && k !== originalKey);
+  c.executionCtx.waitUntil(deleteObjects(c.env, replaced));
+  await setLandingMode(c.env, "image");
+  await audit(c.env, actor, original instanceof File ? "admin.landing_background.upload" : "admin.landing_background.recrop", "system", "landing_background");
+  const next = await readBackgroundState(c.env);
+  return ok(backgroundAdminView(next));
 });
 
+app.get("/api/admin/system-settings/background/original", async (c) => {
+  const state = await readBackgroundState(c.env);
+  const key = state.original_key || state.cropped_key;
+  if (!key) return fail("BACKGROUND_NOT_FOUND", "No custom landing background", 404);
+  const object = await c.env.MAIL_BUCKET.get(key);
+  if (!object) return fail("BACKGROUND_NOT_FOUND", "Background object missing", 404);
+  return new Response(object.body, {
+    headers: { "Content-Type": (state.original_key ? state.original_type : state.cropped_type) || object.httpMetadata?.contentType || "image/jpeg", "Cache-Control": "private, max-age=300" }
+  });
+});
+
+/** Soft delete: the landing page falls back to the default immediately, objects are kept for 30 minutes. */
 app.delete("/api/admin/system-settings/background", async (c) => {
   const actor = c.get("user");
-  const previous = await first<{ r2_key: string | null }>(c.env.DB.prepare("SELECT r2_key FROM app_settings WHERE key = 'landing_background'"));
-  if (previous?.r2_key) await c.env.MAIL_BUCKET.delete(previous.r2_key);
-  await c.env.DB.prepare("INSERT INTO app_settings (key, value, type, r2_key, updated_at) VALUES ('landing_background', '', 'image', NULL, ?) ON CONFLICT(key) DO UPDATE SET value = '', r2_key = NULL, updated_at = excluded.updated_at")
-    .bind(now())
-    .run();
-  await audit(c.env, actor, "admin.landing_background.delete", "system", "landing_background");
-  return ok({ deleted: true });
+  const state = await readBackgroundState(c.env);
+  if (!state.cropped_key) return fail("BACKGROUND_NOT_FOUND", "No custom landing background", 404);
+  // A newer delete replaces an older pending one; purge the older objects now.
+  if (state.pending) await deleteObjects(c.env, [state.pending.cropped_key, state.pending.original_key]);
+  const pending: BackgroundPending = {
+    token: crypto.randomUUID(),
+    deadline: new Date(Date.now() + BG_RESTORE_WINDOW_MS).toISOString(),
+    cropped_key: state.cropped_key,
+    cropped_type: state.cropped_type,
+    original_key: state.original_key,
+    original_type: state.original_type,
+    crop: state.crop
+  };
+  await writeBackgroundState(c.env, { cropped_key: null, cropped_type: null, original_key: null, original_type: null, crop: null, pending });
+  await audit(c.env, actor, "admin.landing_background.delete", "system", "landing_background", { restore_deadline: pending.deadline });
+  return ok({ deleted: true, restore: { token: pending.token, deadline: pending.deadline } });
+});
+
+app.post("/api/admin/system-settings/background/restore", async (c) => {
+  const actor = c.get("user");
+  const body = await c.req.json<{ token?: string }>().catch(() => ({} as { token?: string }));
+  const state = await readBackgroundState(c.env);
+  const pending = state.pending;
+  if (!pending || !body.token || body.token !== pending.token) return fail("RESTORE_NOT_FOUND", "Nothing to restore", 404);
+  if (new Date(pending.deadline).getTime() <= Date.now()) {
+    await purgeExpiredBackground(c.env);
+    return fail("RESTORE_EXPIRED", "The restore window has expired", 410);
+  }
+  // Anything uploaded after the delete is replaced by the restored image.
+  const superseded = [state.cropped_key, state.original_key].filter((k) => k && k !== pending.cropped_key && k !== pending.original_key);
+  await writeBackgroundState(c.env, {
+    cropped_key: pending.cropped_key,
+    cropped_type: pending.cropped_type,
+    original_key: pending.original_key,
+    original_type: pending.original_type,
+    crop: pending.crop,
+    pending: null
+  });
+  c.executionCtx.waitUntil(deleteObjects(c.env, superseded));
+  await setLandingMode(c.env, "image");
+  await audit(c.env, actor, "admin.landing_background.restore", "system", "landing_background");
+  return ok(backgroundAdminView(await readBackgroundState(c.env)));
 });
 
 app.get("/api/admin/mailboxes", async (c) => {
