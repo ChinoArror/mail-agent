@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+node_modules/
+node_modules.lnk
+
+# Cloudflare / Wrangler local state
+.wrangler/
+.wrangler/
+
+# Build outputs
+dist/
+
+build/
+out/
+.vite/
+
+# Test outputs and screenshots
+**/__tests__/
+**/tests/
+*.test.*
+*.spec.*
+playwright.config.*
+coverage/
+test-results/
+playwright-report/
+output/
+output/
+*.snap
+*.trace
+
+# Secrets
+secret.txt
+**/secret.txt
+.env
+.env.*
+
+# User-provided prompts, guidance, and checklists
+AGENT_PROMPT.md
+UPDATED_AGENT_PROMPT.md
+UI_CHECKLIST.md
+ui_update_guidance.md
+page_description.md
+workers_mail_app_package/AGENT_PROMPT.md
+workers_mail_app_package/checklists/
+
+# User-provided images and generated image artifacts
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.avif
+*.bmp
+*.tiff
+*.svg
+
+# App icons and static assets (exempt from the screenshot rules above)
+!workers_mail_app_package/public/
+!workers_mail_app_package/public/*.svg
+!workers_mail_app_package/public/*.png
+!workers_mail_app_package/public/*.ico

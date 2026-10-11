@@ -53,3 +53,9 @@ workers_mail_app_package/checklists/
 *.bmp
 *.tiff
 *.svg
+
+# App icons and static assets (exempt from the screenshot rules above)
+!workers_mail_app_package/public/
+!workers_mail_app_package/public/*.svg
+!workers_mail_app_package/public/*.png
+!workers_mail_app_package/public/*.ico

@@ -115,7 +115,7 @@ The frontend never calls Resend directly. `RESEND_API_KEY` must be configured as
 ### Attachments
 
 - Attachments are stored in private R2 objects.
-- All new mail payloads and attachments use the `mail-sub/` prefix in the `mail-agent-save` R2 bucket (`mail-sub/raw/inbound/`, `mail-sub/raw/outbound/`, `mail-sub/attachments/inbound/`, and `mail-sub/drafts/`). The landing background also uses `mail-sub/settings/`.
+- All new mail payloads and attachments use the `mail-sub/` prefix in the `mail-agent-save` R2 bucket (`mail-sub/raw/inbound/`, `mail-sub/raw/outbound/`, `mail-sub/attachments/inbound/`, and `mail-sub/drafts/`). The landing background uses `mail-sub/Background/{APP_UUID}/original/` (full source, kept for re-cropping) and `mail-sub/Background/{APP_UUID}/cropped/` (the 1920×1080 image served on the sign-in page).
 - D1 stores only metadata and `r2_key`.
 - Downloads always go through Worker authorization.
 - Dangerous extensions are blocked, including `.exe`, `.bat`, `.cmd`, `.js`, `.vbs`, `.scr`.
@@ -165,22 +165,30 @@ The frontend never calls Gemini directly. `GEMINI_API_KEY` must be configured as
 
 ### User Interface
 
-The UI is a compact SaaS-style mailbox dashboard:
+The UI follows the **SnowLuma design language** (calm sky-blue oklch tokens, sidebar-toned chrome with an inset canvas, dual-shadow cards, spring-feel motion):
 
-- dark left sidebar,
-- compact top bar,
-- smaller search inputs and controls,
-- light content area,
-- responsive layout,
-- light and dark mode,
-- mailbox workbench with mailbox cards on the left and messages on the right,
-- compact compose editor,
-- AI assistant side panel,
-- attachment card grid,
-- usage explanation and trends,
-- user settings page,
-- admin tables and modals,
-- audit log rows that wrap long content.
+- hue-locked oklch light/dark tokens with separate text-tuned status colors; theme can be System / Light / Dark with a circular reveal transition and no flash on first paint,
+- sidebar with a sliding active pill, sticky top bar with page icon/description, global search (`/` to focus), compose shortcut and account menu,
+- stat tiles with icon wells and quota meters, segmented controls with an inverted-label thumb, elastic sliders,
+- glass sign-in card over an interactive Perlin wave field (static under reduced motion), optional custom background image,
+- branded sign-in progress screen (token received → verified → workspace loaded) with retry, and an app-shell skeleton while a stored session restores,
+- `lucide-react` 1.x icons chosen per action (e.g. Bold/Italic/Underline/List/Link/Code in the editor, MailOpen for “mark read”, Snowflake for “freeze”, Undo2 for “restore”),
+- favicon set (`favicon.svg`, `favicon.ico`, PNG sizes, apple-touch icon, web manifest).
+
+Interaction conventions:
+
+- **Confirmations never use browser dialogs.** Destructive or sensitive actions (deleting mailboxes/messages/drafts/attachments/roles/background, disabling users or mailboxes, resetting quotas, changing the default role, replacing the draft body, sending) open a floating modal (`useConfirm()`), which can show the target, a consequence callout and — for the most destructive actions — a type-to-confirm field. The action runs inside the modal; failures stay visible in it.
+- **Bottom-right feedback.** Results show a notice that auto-closes after 5 s with a visible countdown bar (pauses on hover). Long operations (uploads, downloads, sending, exports) show a live activity card with progress that collapses to a pill.
+- **Skeleton screens.** Data panels show shimmer (light-sweep) skeletons shaped like the real content. They appear only if loading takes >120 ms and stay ≥380 ms so fast responses never flash; refreshes keep the current data dimmed instead of blanking.
+- Reduced-motion is honored (spinners keep turning, shimmer stops).
+- **Session verification.** If a tab is left open long enough for the sign-in to expire (detected on return to the tab, on any `401`, or by the JWT `exp`), a *Verification failed* banner appears with a **Refresh** button. Refresh re-verifies with `/api/me`; if that still fails the page reloads, which runs the normal restore → Auth Center silent-renewal flow.
+- **Mobile.** The top bar is balanced (menu left, page title centered, search/compose/account right; search opens as an overlay). The page underneath is scroll-locked while the navigation drawer or a modal is open.
+
+Personal settings → appearance is saved **per account** (`GET/PUT /api/me/preferences`, table `user_preferences`, migration `0005`) and follows the user to every device; a local copy in `localStorage.mail_agent_prefs` is applied before first paint and edits made offline are pushed on the next sign-in:
+
+- **Theme color**: Sky, Blue, Violet, Rose, Emerald, Amber, Orange, or a custom hue; every tint is derived from it,
+- **Display mode**: System / Light / Dark, Night or Pure black (OLED) dark style, Comfortable / Compact density, high contrast,
+- **Animations**: System / Full / Reduced / Off, plus toggles for the animated sign-in background and the theme-switch reveal.
 
 ### Admin Features
 
@@ -214,11 +222,19 @@ Admin identity/permission management:
 
 When an identity is updated, users assigned to that identity receive synchronized local quotas. When a custom identity is deleted, assigned users fall back to the default identity.
 
-Admin system settings currently focus on landing page branding:
+Admin system settings currently focus on landing page branding (Auth Center crop model):
 
-- upload custom landing page background image,
-- set background overlay opacity with numeric input and stepper buttons,
-- delete uploaded background and return to the default background.
+- **Upload / Replace** reads the image locally and opens the crop editor — nothing is saved until *Save crop*,
+- the crop editor shows the exact 16:9 frame; position is set by **dragging the image directly** (mouse, touch, or arrow keys), size by elastic slider, ± buttons, wheel (cursor-anchored) or pinch; the image always covers the frame,
+- the original is stored separately; **Adjust** re-opens the stored original at the saved framing (re-cropping uploads only the new crop),
+- **Delete** is a soft delete with a 30-minute **Restore** window (also offered as *Undo* in the notice); expired objects are purged automatically,
+- image opacity is set with an elastic slider and previewed live.
+
+The **Sign-in experience** page also manages:
+
+- **Landing page** — background *Wave* (original animated line field) or *Image*, wave intensity, waves over image, title, tagline and feature list, with a live scaled preview,
+- **Sign-in loading page** — *Steps* or *Minimal* style, title and message, progress bar and wave background toggles, with a live preview (error states always show the failing step and retry),
+- **Restore original Wave page** — one click (with confirmation) returns both pages to the original design; an uploaded image stays stored and can be switched back on.
 
 ### Usage and Quota Logic
 
@@ -260,10 +276,22 @@ Admins bypass local resource limits but their usage is still recorded and shown 
 workers_mail_app_package/
   src/
     client/
-      main.tsx
-      styles.css
+      main.tsx          app bootstrap + session restore / silent renewal
+      lib.ts            API client, upload/download with progress, theme, formatting
+      auth.tsx          sign-in page, callback progress screen, renewal screen
+      shell.tsx         sidebar, top bar, global search, routing
+      components.tsx    shared UI (Loadable, Segmented, ThemeToggle, Menu, …)
+      pages/mail.tsx    mailboxes, mail, drafts, compose, attachments
+      pages/admin.tsx   usage, settings and admin pages
+      ui/feedback.tsx   notices, live activity, Modal, confirm/prompt
+      ui/skeleton.tsx   Skeleton Swap + shimmer presets
+      ui/cropper.tsx    drag-to-position crop editor
+      ui/slider.tsx     elastic slider
+      ui/waves.tsx      sign-in wave field
+      styles.css        SnowLuma tokens and components
     server/
       worker.ts
+  public/               favicon.svg, favicon.ico, PNG icons, logo.svg, site.webmanifest
   migrations/
     0001_initial.sql
     0002_iteration2.sql
@@ -624,9 +652,10 @@ Admins can:
 
 Admins can:
 
-- upload a custom landing page background image,
-- adjust overlay opacity,
-- delete the uploaded background.
+- upload a custom landing page background image and crop it by dragging,
+- re-crop later from the stored original,
+- adjust image opacity,
+- delete the background (restorable for 30 minutes).
 
 ### Audit Logs
 
@@ -669,6 +698,7 @@ Error response format:
 
 Public:
 
+- `GET /api/me/preferences` / `PUT /api/me/preferences` — per-account appearance (`theme, accent, hue, darkStyle, density, contrast, motion, loginWaves, themeReveal`; unknown keys are dropped)
 - `GET /api/public-config`
 - `GET /api/landing-background`
 - `POST /api/sso-callback`
@@ -718,9 +748,11 @@ Admin:
 - `PATCH /api/admin/roles/:id`
 - `DELETE /api/admin/roles/:id`
 - `GET /api/admin/system-settings`
-- `PATCH /api/admin/system-settings`
-- `POST /api/admin/system-settings/background`
-- `DELETE /api/admin/system-settings/background`
+- `PATCH /api/admin/system-settings` — `landing_background_opacity`, plus `landing: { mode, title, tagline, show_features, waves_over_image, wave_opacity }` and `loading: { style, title, subtitle, show_progress, show_waves }` (also returned by `GET /api/public-config`)
+- `POST /api/admin/system-settings/background` — multipart: `cropped` (required), `original` (only when a new source image is uploaded), `crop` (JSON `{scale,x,y,aspect}`)
+- `GET /api/admin/system-settings/background/original` — stored original for re-cropping (admin only)
+- `DELETE /api/admin/system-settings/background` — soft delete, returns `{ restore: { token, deadline } }`
+- `POST /api/admin/system-settings/background/restore` — body `{ token }`, valid for 30 minutes
 - `GET /api/admin/mailboxes`
 - `PATCH /api/admin/mailboxes/:id/status`
 - `GET /api/admin/analysis`

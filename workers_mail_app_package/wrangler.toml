@@ -15,15 +15,14 @@ not_found_handling = "single-page-application"
 
 [vars]
 APP_ID = "mail-agent"
-APP_UUID = "357a4032-ce5b-49bd-8ab4-24b06d5a7e5b"
 AUTH_CENTER_URL = "https://accounts.aryuki.com"
 CALLBACK_URL = "https://mail.112327.xyz/sso-callback"
 MAIL_DOMAIN = "112327.xyz"
-DEFAULT_MAX_MAILBOXES = "5"
+DEFAULT_MAX_MAILBOXES = "10"
 DEFAULT_MAX_SEND_PER_DAY = "50"
 DEFAULT_MAX_RECEIVE_PER_DAY = "200"
 DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES = "104857600"
-GEMINI_MODEL = "gemini-3.5-flash-preview"
+GEMINI_MODEL = "gemini-3.8-flash"
 
 [observability]
 enabled = false
