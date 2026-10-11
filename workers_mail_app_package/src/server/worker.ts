@@ -252,7 +252,7 @@ async function verifyToken(env: Env, token: string): Promise<AppUser | Response>
     name,
     avatar_url: avatar,
     display_name: existing?.display_name || name,
-    language: existing?.language || "zh",
+    language: "en",
     theme: existing?.theme || "system",
     token
   };
@@ -376,11 +376,11 @@ async function ensureDefaultRoles(env: Env) {
     readonly: ["mailboxes", "emails", "attachments", "usage"]
   };
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO roles (id, role_key, name, description, sort_order, is_default, is_system, permissions, limits_json, created_at, updated_at) VALUES (?, 'admin', '管理员', '拥有所有管理权限', 1, 0, 1, ?, ?, ?, ?)")
+    env.DB.prepare("INSERT INTO roles (id, role_key, name, description, sort_order, is_default, is_system, permissions, limits_json, created_at, updated_at) VALUES (?, 'admin', 'Administrator', 'Full administrative access', 1, 0, 1, ?, ?, ?, ?)")
       .bind(id("role"), JSON.stringify([...permissions.admin, "system"]), JSON.stringify({ unlimited: true }), ts, ts),
-    env.DB.prepare("INSERT INTO roles (id, role_key, name, description, sort_order, is_default, is_system, permissions, limits_json, created_at, updated_at) VALUES (?, 'user', '普通用户', '默认临时邮箱用户权限', 2, 1, 1, ?, ?, ?, ?)")
+    env.DB.prepare("INSERT INTO roles (id, role_key, name, description, sort_order, is_default, is_system, permissions, limits_json, created_at, updated_at) VALUES (?, 'user', 'User', 'Default temporary mailbox access', 2, 1, 1, ?, ?, ?, ?)")
       .bind(id("role"), JSON.stringify(permissions.user), JSON.stringify({ max_mailboxes: Number(env.DEFAULT_MAX_MAILBOXES || 5), max_send_per_day: Number(env.DEFAULT_MAX_SEND_PER_DAY || 50), max_receive_per_day: Number(env.DEFAULT_MAX_RECEIVE_PER_DAY || 200), max_attachment_total_mb: Math.round(Number(env.DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES || 104857600) / 1024 / 1024) }), ts, ts),
-    env.DB.prepare("INSERT INTO roles (id, role_key, name, description, sort_order, is_default, is_system, permissions, limits_json, created_at, updated_at) VALUES (?, 'readonly', '只读用户', '仅查看邮件和附件', 3, 0, 1, ?, ?, ?, ?)")
+    env.DB.prepare("INSERT INTO roles (id, role_key, name, description, sort_order, is_default, is_system, permissions, limits_json, created_at, updated_at) VALUES (?, 'readonly', 'Read only', 'View mail and attachments only', 3, 0, 1, ?, ?, ?, ?)")
       .bind(id("role"), JSON.stringify(permissions.readonly), JSON.stringify({ max_mailboxes: 1, max_send_per_day: 0, max_receive_per_day: 50, max_attachment_total_mb: 50 }), ts, ts)
   ]);
 }
@@ -399,7 +399,7 @@ async function getEffectiveRole(env: Env, user: { id: string; role: Role; app_ro
     return {
       id: null,
       role_key: user.role === "admin" ? "admin" : "user",
-      name: user.role === "admin" ? "管理员" : "普通用户",
+      name: user.role === "admin" ? "Administrator" : "User",
       permissions: user.role === "admin" ? ["mailboxes", "emails", "drafts", "attachments", "usage", "settings", "users", "roles", "system", "analysis", "audit"] : ["mailboxes", "emails", "drafts", "attachments", "usage", "settings"],
       limits: {}
     };
@@ -460,7 +460,7 @@ async function ensureDefaultSettings(env: Env) {
   if (count?.count) return;
   const ts = now();
   const defaults: Array<[string, string, string]> = [
-    ["site_name", "Cloud 邮箱系统", "string"],
+    ["site_name", "Cloud Mail", "string"],
     ["landing_background_opacity", "0.18", "number"],
     ["landing_background", "", "image"]
   ];
@@ -938,7 +938,7 @@ app.post("/api/emails/send", async (c) => {
   const subject = cleanHeader(body.subject ?? draft?.subject) || "";
   const textBody = String(body.text_body ?? draft?.text_body ?? "");
   const htmlBody = String(body.html_body ?? draft?.html_body ?? "");
-  const rawKey = `raw/outbound/${ts.slice(0, 10)}/${emailId}.json`;
+  const rawKey = `mail-sub/raw/outbound/${ts.slice(0, 10)}/${emailId}.json`;
   await c.env.MAIL_BUCKET.put(rawKey, JSON.stringify({ mailbox: mailbox!.email, to, cc, bcc, subject, text_body: textBody, html_body: htmlBody }), {
     httpMetadata: { contentType: "application/json" }
   });
@@ -1087,7 +1087,7 @@ app.post("/api/attachments/upload", async (c) => {
   const limited = await enforceAttachmentLimit(c.env, user, file.size);
   if (limited) return limited;
   const attachmentId = id("att");
-  const key = `drafts/${user.id}/${draftId}/${attachmentId}-${filename}`;
+  const key = `mail-sub/drafts/${user.id}/${draftId}/${attachmentId}-${filename}`;
   await c.env.MAIL_BUCKET.put(key, file.stream(), { httpMetadata: { contentType: file.type } });
   await c.env.DB.prepare(
     "INSERT INTO attachments (id, user_id, draft_id, direction, filename, content_type, size_bytes, r2_key, file_type, scan_status, scan_error, created_at) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -1452,7 +1452,7 @@ app.post("/api/admin/system-settings/background", async (c) => {
   if (!(file instanceof File)) return fail("FILE_REQUIRED", "Background image is required", 400);
   if (!file.type.startsWith("image/")) return fail("INVALID_IMAGE", "Only images are allowed", 400);
   if (file.size > 8 * 1024 * 1024) return fail("IMAGE_TOO_LARGE", "Image must be under 8MB", 413);
-  const key = `settings/landing-background/${id("bg")}-${sanitizeFilename(file.name || "background")}`;
+  const key = `mail-sub/settings/landing-background/${id("bg")}-${sanitizeFilename(file.name || "background")}`;
   await c.env.MAIL_BUCKET.put(key, file.stream(), { httpMetadata: { contentType: file.type } });
   const previous = await first<{ r2_key: string | null }>(c.env.DB.prepare("SELECT r2_key FROM app_settings WHERE key = 'landing_background'"));
   if (previous?.r2_key) await c.env.MAIL_BUCKET.delete(previous.r2_key);
@@ -1668,7 +1668,7 @@ async function handleMailParse(env: Env, emailId: string) {
         if (limited) continue;
       }
       const attachmentId = id("att");
-      const key = `attachments/inbound/${email.user_id}/${emailId}/${attachmentId}-${filename}`;
+      const key = `mail-sub/attachments/inbound/${email.user_id}/${emailId}/${attachmentId}-${filename}`;
       await env.MAIL_BUCKET.put(key, att.content, { httpMetadata: { contentType } });
       await env.DB.prepare(
         "INSERT INTO attachments (id, user_id, email_id, direction, filename, content_type, size_bytes, r2_key, file_type, scan_status, created_at) VALUES (?, ?, ?, 'inbound', ?, ?, ?, ?, ?, 'passed', ?)"
@@ -1748,7 +1748,7 @@ async function receiveEmail(message: ForwardableEmailMessage, env: Env) {
   }
   const emailId = id("eml");
   const ts = now();
-  const rawKey = `raw/inbound/${ts.slice(0, 10)}/${emailId}.eml`;
+  const rawKey = `mail-sub/raw/inbound/${ts.slice(0, 10)}/${emailId}.eml`;
   const raw = await new Response(message.raw).arrayBuffer();
   await env.MAIL_BUCKET.put(rawKey, raw, { httpMetadata: { contentType: "message/rfc822" } });
   await env.DB.prepare(

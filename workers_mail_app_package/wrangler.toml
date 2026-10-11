@@ -2,6 +2,8 @@ name = "mail-agent"
 main = "src/server/worker.ts"
 compatibility_date = "2026-05-12"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+preview_urls = false
 routes = [
   { pattern = "mail.112327.xyz", custom_domain = true }
 ]
@@ -21,7 +23,10 @@ DEFAULT_MAX_MAILBOXES = "5"
 DEFAULT_MAX_SEND_PER_DAY = "50"
 DEFAULT_MAX_RECEIVE_PER_DAY = "200"
 DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES = "104857600"
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = "gemini-3.5-flash-preview"
+
+[observability]
+enabled = false
 
 [[d1_databases]]
 binding = "DB"

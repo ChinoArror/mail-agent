@@ -1,7 +1,5 @@
 # Mail Agent
 
-English | [简体中文](README_zh.md)
-
 Mail Agent is a Cloudflare Workers full-stack temporary mailbox web app. It lets users create temporary addresses under `112327.xyz`, receive mail through Cloudflare Email Routing, send mail through Resend, manage drafts and attachments, and use a Gemini-powered email assistant. The app is built as a React SPA served by Cloudflare Workers Assets, with a Hono Worker backend, D1, R2, Queues, and an Email Worker entrypoint.
 
 The current production custom domain is:
@@ -117,6 +115,7 @@ The frontend never calls Resend directly. `RESEND_API_KEY` must be configured as
 ### Attachments
 
 - Attachments are stored in private R2 objects.
+- All new mail payloads and attachments use the `mail-sub/` prefix in the `mail-agent-save` R2 bucket (`mail-sub/raw/inbound/`, `mail-sub/raw/outbound/`, `mail-sub/attachments/inbound/`, and `mail-sub/drafts/`). The landing background also uses `mail-sub/settings/`.
 - D1 stores only metadata and `r2_key`.
 - Downloads always go through Worker authorization.
 - Dangerous extensions are blocked, including `.exe`, `.bat`, `.cmd`, `.js`, `.vbs`, `.scr`.
@@ -278,7 +277,6 @@ workers_mail_app_package/
   wrangler.toml
   package.json
   README.md
-  README_zh.md
 ```
 
 ## Local Development
@@ -316,6 +314,7 @@ Current configured resources:
 D1 database name: mail-agent-db
 D1 database id:   730603a4-3b9f-45b9-bc03-311d116f3c49
 R2 bucket name:   mail-agent-save
+R2 object prefix: mail-sub/
 Worker name:      mail-agent
 Custom domain:    mail.112327.xyz
 ```
@@ -368,7 +367,7 @@ DEFAULT_MAX_MAILBOXES = "5"
 DEFAULT_MAX_SEND_PER_DAY = "50"
 DEFAULT_MAX_RECEIVE_PER_DAY = "200"
 DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES = "104857600"
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = "gemini-3.5-flash-preview"
 ```
 
 Custom domain:
@@ -462,7 +461,7 @@ npx wrangler secret put GEMINI_API_KEY
 Optional model configuration is controlled by:
 
 ```toml
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = "gemini-3.5-flash-preview"
 ```
 
 ## Deployment
@@ -471,7 +470,7 @@ Build and deploy:
 
 ```bash
 npm run build
-npx wrangler deploy --config wrangler.toml
+npx wrangler deploy --config wrangler.toml --assets ./dist --keep-vars
 ```
 
 Or:
@@ -486,7 +485,7 @@ Useful verification:
 npm run typecheck
 npm run build
 npx wrangler d1 migrations apply mail-agent-db --remote --config wrangler.toml
-npx wrangler deploy --config wrangler.toml
+npx wrangler deploy --config wrangler.toml --assets ./dist --keep-vars
 ```
 
 Public config check:
@@ -564,7 +563,7 @@ Users can edit:
 
 - display name,
 - avatar URL,
-- language,
+- English-only interface,
 - theme,
 - draft retention period.
 
@@ -774,14 +773,16 @@ Recent validation performed:
 npm run typecheck
 npm run build
 npx wrangler d1 migrations apply mail-agent-db --remote --config wrangler.toml
-npx wrangler deploy --config wrangler.toml
+npx wrangler deploy --config wrangler.toml --assets ./dist --keep-vars
 ```
 
-Latest recorded deployment in checklist:
+Latest deployment:
 
 ```text
-Version ID: 8446d2bd-8bd9-4383-952a-70b802c825ca
+Version ID: 98a4f0ec-a0dd-450e-bd34-5700e54eff1d
 ```
+
+On 2026-10-11, the remote R2 bucket was cleared and mail-related D1 rows were reset. Users, roles, mailbox addresses, quota settings, token counters, and audit history were retained. Pre-reset backups are in the gitignored local `output/` directory.
 
 Full completed checklist:
 

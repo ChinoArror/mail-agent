@@ -1,6 +1,7 @@
 # Dependencies
 node_modules/
 workers_mail_app_package/node_modules/
+workers_mail_app_package/node_modules.lnk
 
 # Cloudflare / Wrangler local state
 .wrangler/
@@ -14,6 +15,11 @@ out/
 .vite/
 
 # Test outputs and screenshots
+**/__tests__/
+**/tests/
+*.test.*
+*.spec.*
+playwright.config.*
 coverage/
 test-results/
 playwright-report/
